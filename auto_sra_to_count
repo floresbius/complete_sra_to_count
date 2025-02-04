@@ -394,15 +394,23 @@ echo -e "\033[0;32mTotal BAM files to process: $bam_count\033[0m"
 
 # Copy the reference GTF file from any SRR folder
 gtf_file=""
-for dir in SRR*; do
-    if [ -f "$dir"*.gtf ]; then
-        gtf_file=$(ls "$dir"*.gtf | head -n 1)
+for dir in SRR*/; do  # Iterate over SRR directories
+    gtf_path=$(find "$dir" -maxdepth 1 -type f -name "*.gtf" | head -n 1)  # Find the first .gtf file in the SRR folder
+
+    if [[ -n "$gtf_path" ]]; then  # Check if a .gtf file was found
         echo -e "\033[0;34mCopying GTF file from $dir to featureCounts/\033[0m"
-        cp "$gtf_file" featureCounts/
-        gtf_file="featureCounts/$(basename "$gtf_file")"
-        break
+        cp "$gtf_path" featureCounts/
+        gtf_file="featureCounts/$(basename "$gtf_path")"
+        break  # Stop the loop after copying the first .gtf file
     fi
 done
+
+# Check if no GTF file was found
+if [[ -z "$gtf_file" ]]; then
+    echo -e "\033[0;31mError: No GTF file found in any SRR folder. Cannot proceed with featureCounts.\033[0m"
+    exit 1
+fi
+
 
 # Ensure a GTF file was copied
 if [[ ! -f "$gtf_file" ]]; then
