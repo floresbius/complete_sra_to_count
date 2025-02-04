@@ -1,0 +1,426 @@
+#!/bin/bash
+
+# Check if Conda and required packages are installed and up-to-date
+if ! command -v conda &> /dev/null; then
+    echo -e "\033[0;31mError: Conda is not installed. Please install Miniconda or Anaconda first.\033[0m"
+    exit 1
+fi
+
+echo -e "\033[0;34mWould you like to create a new Conda environment for RNA-seq analysis? (yes/no)\033[0m"
+read -r create_env
+
+if [[ "$create_env" == "yes" ]]; then
+    echo -e "\033[0;34mEnter the name of the new Conda environment:\033[0m"
+    read -r ENV_NAME
+
+    # Create and activate the new environment, if selected "yes"
+    echo -e "\033[0;34mCreating Conda environment: $ENV_NAME\033[0m"
+    conda create -n "$ENV_NAME" python=3.9 -y fastqc fastp multiqc star samtools subread sra-tools
+
+    echo -e "\033[0;34mActivating Conda environment: $ENV_NAME\033[0m"
+    conda activate "$ENV_NAME"
+
+    conda config --set channel_priority flexible
+
+elif [[ "$create_env" == "no" ]]; then
+    echo -e "\033[0;34mProceeding with installation in the current Conda environment.\033[0m"
+else
+    echo -e "\033[0;31mInvalid response. Please run the script again and enter 'yes' or 'no'.\033[0m"
+    exit 1
+fi
+
+# Bash script for checking the required packages
+check_install() {
+    local package="$1"
+    if ! conda list | grep -q "^$package"; then
+        echo -e "\033[0;33mInstalling missing package: $package\033[0m"
+        conda install -y -c bioconda "$package"
+    else
+        echo -e "\033[0;32m$package is already installed.\033[0m"
+    fi
+}
+
+REQUIRED_PACKAGES=("fastqc" "fastp" "multiqc" "star" "samtools" "subread" "sra-tools")
+
+for package in "${REQUIRED_PACKAGES[@]}"; do
+    check_install "$package"
+done
+
+echo -e "\033[0;32mAll dependencies are installed and up to date!\033[0m"
+
+###########################################################################################################
+
+echo -e "\033[0;34mEnter SRR codes to download (space-separated):\033[0m"
+read -r SRR_CODES
+
+# Loop through each SRR code input and download it
+for SRR in $SRR_CODES; do
+    echo -e "\033[0;34mDownloading $SRR...\033[0m"
+    prefetch "$SRR" -O ./ || { echo -e "\033[0;31mError downloading $SRR. Skipping...\033[0m"; continue; }
+done
+
+###########################################################################################################
+
+for dir in SRR*; do
+
+    if [ -d "$dir" ]; then
+        sra_file="$dir/$dir.sra"
+
+    if [ -f "$sra_file" ]; then
+            echo -e "\033[0;32mProcessing: $sra_file\033[0m"
+			
+            cd "$dir" || { echo -e "\033[0;31mError: Could not enter directory $dir\033[0m"; exit 1; }
+			
+            fastq-dump --split-files --gzip "$dir.sra"
+			
+			
+            cd ..
+
+        else
+            echo -e "\033[0;31mWarning: No *.sra file found in $dir\033[0m"
+        fi
+    fi
+done
+
+###########################################################################################################
+
+for dir in SRR*; do
+
+	if [ -d "$dir" ]; then
+		echo "Running FastQC for files in $dir"
+
+		cd "$dir" || { echo "Error: Could not enter directory $dir"; exit 1; }
+
+		fastqc --outdir . *.fastq.gz
+
+	cd ..
+
+fi
+done
+
+echo "FastQC analysis completed for all folder in the current directory."
+
+###########################################################################################################
+
+for dir in SRR*; do
+
+if [ -d "$dir" ]; then
+		echo -e "\033[0;32mRunning MultiQC for $dir\033[0m"
+
+		cd "$dir" || { echo -e "\033[0;31mError: Could not enter directory $dir\033[0m"; exit 1; }
+
+	if ! 	multiqc . -o .; then
+		echo -e "\033[0;31mMultiQC failed for $dir. Might be a result of single-end reads.\033[0m"
+            exit 1
+        fi
+
+		cd ..
+fi
+
+done
+
+echo -e "\033[0;32mMultiQC analysis completed for all folders!\033[0m"
+
+###########################################################################################################
+
+for dir in SRR*; do
+    if [ -d "$dir" ]; then
+        echo -e "\033[0;32mChecking read type for $dir...\033[0m"
+
+        # Identify read type
+        r1="$dir/${dir}_1.fastq.gz"
+        r2="$dir/${dir}_2.fastq.gz"
+        single="$dir/${dir}.fastq.gz"
+
+        # Create trimmed output directory
+        trimmed_dir="$dir/trimmed"
+        mkdir -p "$trimmed_dir"
+
+        # Define output file names
+        trimmed_r1="$trimmed_dir/trim_${dir}_1.fastq.gz"
+        trimmed_r2="$trimmed_dir/trim_${dir}_2.fastq.gz"
+        trimmed_single="$trimmed_dir/trim_${dir}.fastq.gz"
+
+        json_report="$trimmed_dir/fastp_report.json"
+        html_report="$trimmed_dir/fastp_report.html"
+
+        # Run fastp based on read type
+        if [[ -f "$r1" && -f "$r2" ]]; then
+            echo -e "\033[0;34mDetected paired-end reads. Running fastp on $r1 and $r2\033[0m"
+
+            fastp --in1 "$r1" --in2 "$r2" \
+                  --out1 "$trimmed_r1" --out2 "$trimmed_r2" \
+                  --json "$json_report" --html "$html_report" --thread 8
+
+        elif [[ -f "$single" ]]; then
+            echo -e "\033[0;34mDetected single-end reads. Running fastp on $single\033[0m"
+
+            fastp --in1 "$single" \
+                  --out1 "$trimmed_single" \
+                  --json "$json_report" --html "$html_report" --thread 8
+
+        else
+            echo -e "\033[0;31mWarning: No FASTQ files found in $dir. Skipping...\033[0m"
+            continue
+        fi
+
+        echo -e "\033[0;32mTrimming completed for $dir! Trimmed reads saved in $trimmed_dir\033[0m"
+    fi
+done
+
+echo -e "\033[0;32mFastp trimming completed for all folders!\033[0m"
+
+###########################################################################################################
+
+echo -e "\033[0;34mRunning FastQC on trimmed FASTQ files...\033[0m"
+
+for dir in SRR*; do
+    if [ -d "$dir/trimmed" ]; then
+        echo -e "\033[0;32mRunning FastQC for trimmed files in $dir/trimmed\033[0m"
+
+        cd "$dir/trimmed" || { echo -e "\033[0;31mError: Could not enter directory $dir/trimmed\033[0m"; exit 1; }
+
+        fastqc --outdir . trim_*.fastq.gz
+
+        cd ../..
+    else
+        echo -e "\033[0;31mWarning: No 'trimmed' folder found in $dir. Skipping...\033[0m"
+    fi
+done
+
+echo -e "\033[0;32mFastQC analysis completed for all trimmed files!\033[0m"
+
+###########################################################################################################
+
+echo -e "\033[0;34mRunning MultiQC on trimmed FastQC reports...\033[0m"
+
+for dir in SRR*; do
+    if [ -d "$dir/trimmed" ]; then
+        echo -e "\033[0;32mRunning MultiQC for trimmed files in $dir/trimmed\033[0m"
+
+        cd "$dir/trimmed" || { echo -e "\033[0;31mError: Could not enter directory $dir/trimmed\033[0m"; exit 1; }
+
+        if ! multiqc . -o . --filename "${dir}_multiqc_report_trim"; then
+            echo -e "\033[0;31mMultiQC failed for $dir/trimmed\033[0m"
+            exit 1
+        fi
+
+        cd ../..
+    else
+        echo -e "\033[0;31mWarning: No 'trimmed' folder found in $dir. Skipping...\033[0m"
+    fi
+done
+
+###########################################################################################################
+
+download_reference_files() {
+
+	local folder="$1"
+	echo -e "\033[0;34mChecking reference files for $folder...\033[0m"
+	cd "$folder" || { echo -e "\033[0;31mError: Could not enter directory $folder\033[0m"; exit 1; }
+
+	# Check wget
+	if ! command -v wget &> /dev/null; then
+		echo -e "\033[0;31mError: wget is not installed. Install it using 'sudo apt install wget' or 'conda install wget'.\033[0m"
+		exit 1
+	fi
+
+	# Download reference genome FASTA file if missing
+	if [[ ! -f GCF_000240135.3_ASM24013v3_genomic.fna ]]; then
+		echo -e "\033[0;33mDownloading Fusarium graminearum genome...\033[0m"
+		wget -c https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/240/135/GCF_000240135.3_ASM24013v3/GCF_000240135.3_ASM24013v3_genomic.fna.gz \
+			&& gunzip -f GCF_000240135.3_ASM24013v3_genomic.fna.gz \
+			|| { echo -e "\033[0;31mFailed to download genome file!\033[0m"; exit 1; }
+	else
+		echo -e "\033[0;32mGenome file already exists. Skipping download.\033[0m"
+	fi
+
+	# Download GTF annotation file if missing
+	if [[ ! -f GCF_000240135.3_ASM24013v3_genomic.gtf ]]; then
+		echo -e "\033[0;33mDownloading Fusarium graminearum annotation...\033[0m"
+		wget -c https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/240/135/GCF_000240135.3_ASM24013v3/GCF_000240135.3_ASM24013v3_genomic.gtf.gz \
+			&& gunzip -f GCF_000240135.3_ASM24013v3_genomic.gtf.gz \
+
+	else
+		echo -e "\033[0;32mGTF annotation file already exists. Skipping download.\033[0m"
+	fi
+
+	cd ..
+}
+
+
+for dir in SRR*; do
+	if [ -d "$dir" ]; then
+		echo -e "\033[0;32mSetting up directory structure for $dir\033[0m"
+
+		# Create necessary subfolders for STAR analysis
+		mkdir -p "$dir/ref" "$dir/fastq" "$dir/mapped"
+
+		# Execute reference files downloading sub-script
+		download_reference_files "$dir"
+
+		# Find, move, check and unzip the *.fastq.gz files
+		echo -e "\033[0;34mSearching for trimmed FASTQ.GZ files in $dir...\033[0m"
+		find "$dir" -type f -name "trim_*.fastq.gz" -exec mv {} "$dir/fastq/" \;
+
+		if ls "$dir/fastq/"*.fastq.gz 1> /dev/null 2>&1; then
+			echo -e "\033[0;32mFASTQ.GZ files moved successfully to $dir/fastq/\033[0m"
+		else
+			echo -e "\033[0;31mWarning: No trimmed FASTQ.GZ files found in $dir\033[0m"
+			continue
+		fi
+		echo -e "\033[0;34mDecompressing FASTQ.GZ files in $dir/fastq/\033[0m"
+		gunzip "$dir/fastq/"*.fastq.gz
+
+		echo -e "\033[0;34mListing decompressed FASTQ files in $dir/fastq/:\033[0m"
+		ls -lh "$dir/fastq/"
+
+		# Run STAR genome indexing
+		echo -e "\033[0;34mRunning STAR genome indexing for $dir...\033[0m"
+
+		STAR --runMode genomeGenerate \
+			--genomeDir "$dir/ref/" \
+			--genomeFastaFiles "$dir/GCF_000240135.3_ASM24013v3_genomic.fna" \
+			--sjdbGTFfile "$dir/GCF_000240135.3_ASM24013v3_genomic.gtf" \
+			--runThreadN 16
+
+		echo -e "\033[0;32mSTAR genome indexing completed for $dir\033[0m"
+	fi
+
+done
+
+echo -e "\033[0;32mAll SRR folders are set up and the genomes were indexed successfully!\033[0m"
+
+###########################################################################################################
+
+for dir in SRR*; do
+    if [ -d "$dir" ]; then
+        echo -e "\033[0;32mStarting STAR alignment for $dir\033[0m"
+
+        # Define paths
+        fastq_dir="$dir/fastq"
+        ref_dir="$dir/ref"
+        mapped_dir="$dir/mapped"
+
+        # Check if *.fastq files exist
+        if ls "$fastq_dir"/*.fastq 1> /dev/null 2>&1; then
+            echo -e "\033[0;34m*.fastq files found in $fastq_dir, starting alignment...\033[0m"
+
+            # Loop through each *.fastq file in the fastq/ directory
+            for file in "$fastq_dir"/*.fastq; do
+                filename=$(basename "$file" .fastq)  # Extract file name without extension
+                echo -e "\033[0;34mAligning $filename.fastq...\033[0m"
+
+                # Run STAR alignment for *.fastq files
+                STAR --runMode alignReads \
+                     --genomeDir "$ref_dir" \
+                     --outSAMtype BAM SortedByCoordinate \
+                     --readFilesIn "$file" \
+                     --runThreadN 12 \
+                     --outFileNamePrefix "$mapped_dir/$filename"
+
+                echo -e "\033[0;32mAlignment completed for $filename.fastq\033[0m"
+            done
+
+        else
+            echo -e "\033[0;31mNo *.fastq files found in $fastq_dir, skipping $dir\033[0m"
+        fi
+    fi
+done
+
+echo -e "\033[0;32mSTAR alignment completed for *.fastq files in all SRR subfolders!\033[0m"
+
+###########################################################################################################
+
+echo -e "\033[0;34mStarting BAM merging process...\033[0m"
+
+for dir in SRR*; do
+    if [ -d "$dir/mapped" ]; then
+        echo -e "\033[0;32mChecking BAM files for $dir\033[0m"
+
+        # Define BAM file paths
+        bam_r1="$dir/mapped/trim_${dir}_1Aligned.sortedByCoord.out.bam"
+        bam_r2="$dir/mapped/trim_${dir}_2Aligned.sortedByCoord.out.bam"
+        bam_single="$dir/mapped/trim_${dir}Aligned.sortedByCoord.out.bam"
+        merged_bam="$dir/mapped/${dir}_merged.bam"
+
+        # Case 1: Paired-end reads (merge R1 & R2 BAMs)
+        if [[ -f "$bam_r1" && -f "$bam_r2" ]]; then
+            echo -e "\033[0;34mMerging paired-end BAMs: $bam_r1 and $bam_r2 into $merged_bam...\033[0m"
+
+            samtools merge -@ 12 "$merged_bam" "$bam_r1" "$bam_r2"
+            echo -e "\033[0;32mMerging completed: $merged_bam\033[0m"
+
+        # Case 2: Single-end BAM (no merging needed, just rename)
+        elif [[ -f "$bam_single" ]]; then
+            echo -e "\033[0;34mSingle-end detected. Renaming $bam_single to $merged_bam...\033[0m"
+            mv "$bam_single" "$merged_bam"
+            echo -e "\033[0;32mRenaming completed: $merged_bam\033[0m"
+
+        # Case 3: Missing BAM files
+        else
+            echo -e "\033[0;31mWarning: No BAM files found for $dir. Skipping...\033[0m"
+        fi
+    fi
+done
+
+echo -e "\033[0;32mBAM merging process completed for all SRR folders!\033[0m"
+
+###########################################################################################################
+
+echo -e "\033[0;34mSetting up featureCounts analysis...\033[0m"
+
+# Create featureCounts directory in the main folder
+mkdir -p featureCounts
+
+# Move merged BAM files to the featureCounts directory
+for dir in SRR*; do
+    if [ -f "$dir/mapped/${dir%/}_merged.bam" ]; then
+        echo -e "\033[0;34mCopying $dir/mapped/${dir%/}_merged.bam to featureCounts/\033[0m"
+        cp "$dir/mapped/${dir%/}_merged.bam" featureCounts/
+    else
+        echo -e "\033[0;31mWarning: No merged BAM file found in $dir/mapped/. Skipping...\033[0m"
+    fi
+done
+
+# Count the number of BAM files
+bam_count=$(ls featureCounts/*.bam 2>/dev/null | wc -l)
+if [[ "$bam_count" -eq 0 ]]; then
+    echo -e "\033[0;31mError: No BAM files found in featureCounts/. Cannot proceed with featureCounts.\033[0m"
+    exit 1
+fi
+
+echo -e "\033[0;32mTotal BAM files to process: $bam_count\033[0m"
+
+# Copy the reference GTF file from any SRR folder
+gtf_file=""
+for dir in SRR*; do
+    if [ -f "$dir"*.gtf ]; then
+        gtf_file=$(ls "$dir"*.gtf | head -n 1)
+        echo -e "\033[0;34mCopying GTF file from $dir to featureCounts/\033[0m"
+        cp "$gtf_file" featureCounts/
+        gtf_file="featureCounts/$(basename "$gtf_file")"
+        break
+    fi
+done
+
+# Ensure a GTF file was copied
+if [[ ! -f "$gtf_file" ]]; then
+    echo -e "\033[0;31mError: No GTF file found in any SRR folder. Cannot proceed with featureCounts.\033[0m"
+    exit 1
+fi
+
+# Run featureCounts on all BAM files
+echo -e "\033[0;34mRunning featureCounts on merged BAM files...\033[0m"
+
+featureCounts -a "$gtf_file" \
+              -o featureCounts/count.out \
+              -T "$bam_count" \
+              featureCounts/*.bam
+
+echo -e "\033[0;32mfeatureCounts completed! Output saved in featureCounts/count.out\033[0m"
+
+# Convert count.out to CSV
+echo -e "\033[0;34mConverting count.out to count.csv...\033[0m"
+tail -n +2 featureCounts/count.out | tr '\t' ',' > featureCounts/count.csv
+echo -e "\033[0;32mConversion completed!\033[0m"
